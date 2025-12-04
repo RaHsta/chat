@@ -1,0 +1,7 @@
+{
+  "name": "Gemini Live Voice",
+  "description": "A lovable, real-time conversational AI voice assistant powered by Gemini 2.5 Live API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
