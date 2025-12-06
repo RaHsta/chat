@@ -62,13 +62,13 @@ const mcpSystemControlTool: FunctionDeclaration = {
 // Terminal Tool
 const mcpTerminalTool: FunctionDeclaration = {
   name: "execute_terminal_command",
-  description: "Execute a shell command on the user's ACTUAL HOST COMPUTER via Relay. Supported: ls, cd, mkdir, rm, git, npm, code, start. You have FULL ADMIN/ROOT access.",
+  description: "Execute a shell command on the user's ACTUAL HOST COMPUTER via Relay. Supported: ls, cd, mkdir, rm, git, npm, code, start, Get-Process, ps, kill. You have FULL ADMIN/ROOT access.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       command: {
         type: Type.STRING,
-        description: "The full shell command string to execute (e.g., 'git status', 'npm install', 'start chrome', 'code .').",
+        description: "The full shell command string to execute (e.g., 'git status', 'npm install', 'start chrome', 'code .', 'Get-Process').",
       }
     },
     required: ["command"],
@@ -108,6 +108,7 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
 
   // --- Relay State ---
   const [isRelayConnected, setIsRelayConnected] = useState(false);
+  const [hostPlatform, setHostPlatform] = useState<string>(''); // 'win32', 'darwin', etc.
   const relaySocketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<any>(null);
 
@@ -186,6 +187,8 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
              setCwd(data.content);
           } else if (data.type === 'system') {
              setTerminalLogs(prev => [...prev, { type: 'system', content: data.content }]);
+          } else if (data.type === 'config') {
+             if (data.platform) setHostPlatform(data.platform);
           }
         } catch(e) { console.error(e); }
       };
@@ -232,7 +235,7 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
 
   // --- Setup Script Generator (Batch File) ---
   const downloadSetupScript = useCallback(() => {
-    // 1. The Relay Server Code - UPDATED with Robust Port Hopping (HTTP Server based) AND Admin Check
+    // 1. The Relay Server Code - UPDATED with Platform Config & Robustness
     const relayCode = `
 const WebSocket = require('ws');
 const http = require('http');
@@ -275,6 +278,10 @@ function startServer(index) {
     wss.on('connection', (ws) => {
       console.log('Client connected');
       ws.send(JSON.stringify({ type: 'system', content: \`Connected to Host: \${os.hostname()}\` }));
+      
+      // Send Platform Config explicitly
+      ws.send(JSON.stringify({ type: 'config', platform: os.platform() }));
+      
       ws.send(JSON.stringify({ type: 'cwd', content: currentDir }));
       
       // Check Admin
@@ -376,25 +383,26 @@ startServer(0);
     // Encode source to Base64 to safely embed in Batch file
     const b64Code = btoa(relayCode);
 
-    // 2. The Batch Script Content
+    // 2. The Batch Script Content - Use PowerShell for Robust UAC Elevation
     const batContent = `@echo off
 title Gemini Relay Setup
 cls
-:: Request Admin Privileges
->nul 2>&1 "%SYSTEMROOT%\\system32\\cacls.exe" "%SYSTEMROOT%\\system32\\config\\system"
-if '%errorlevel%' NEQ '0' (
-    echo Requesting administrative privileges...
-    goto UACPrompt
-) else ( goto gotAdmin )
+
+:: Check for Administrator privileges
+net session >nul 2>&1
+if %errorLevel% == 0 (
+    echo [OK] Running as Administrator.
+    goto :gotAdmin
+) else (
+    echo [INFO] Requesting Administrative Privileges...
+    goto :UACPrompt
+)
 
 :UACPrompt
-    echo Set UAC = CreateObject^("Shell.Application"^) > "%temp%\\getadmin.vbs"
-    echo UAC.ShellExecute "%~s0", "", "", "runas", 1 >> "%temp%\\getadmin.vbs"
-    "%temp%\\getadmin.vbs"
-    exit /B
+    powershell -Command "Start-Process '%~f0' -Verb RunAs"
+    exit /b
 
 :gotAdmin
-    if exist "%temp%\\getadmin.vbs" ( del "%temp%\\getadmin.vbs" )
     pushd "%CD%"
     CD /D "%~dp0"
 
@@ -574,9 +582,10 @@ TONE: Soft, warm, and sensual.
 
 CAPABILITIES:
 1. **Terminal**: Use 'execute_terminal_command' to run ANY shell command (git, npm, ls).
-2. **Apps**: Use 'mcp_system_control' -> 'app.open' to launch apps. IMPORTANT: On Windows, use 'Start-Process' or 'start'.
+2. **Apps**: Use 'mcp_system_control' -> 'app.open' to launch apps. IMPORTANT: On Windows, use 'Start-Process "AppName"' or 'Start-Process -FilePath "Path"'.
 3. **Files**: Use 'mcp_system_control' -> 'file.read'/'file.write'.
 4. **Search**: Use 'googleSearch'.
+5. **Processes**: Use 'Get-Process' (Windows) or 'ps aux' (Mac/Linux) to list running tasks.
 
 You are connected to the user's ACTUAL HOST COMPUTER. Do not simulate.
 
@@ -588,11 +597,13 @@ ${memoryContext}`;
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
           // Revert to string format to fix Network Error
-          systemInstruction: systemInstructionText,
+          systemInstruction: { parts: [{ text: systemInstructionText }] },
           tools: [
             { 
-              googleSearch: {}, 
-              functionDeclarations: [mcpSystemControlTool, mcpTerminalTool] 
+              googleSearch: {} 
+            },
+            {
+               functionDeclarations: [mcpSystemControlTool, mcpTerminalTool] 
             }
           ],
         };
@@ -674,12 +685,10 @@ ${memoryContext}`;
                      if (isRelayConnected && relaySocketRef.current) {
                         if (command === 'app.open' && payload.name) {
                             const appName = payload.name;
-                            // Heuristic check for Windows environment from cwd
-                            const isWindows = cwd.includes('\\') || cwd.match(/^[a-zA-Z]:/);
                             const sanitizedApp = appName.replace(/"/g, '\\"');
                             
-                            // Use Start-Process for robust app launching on Windows PowerShell
-                            const openCmd = isWindows 
+                            // Use confirmed platform for command selection
+                            const openCmd = hostPlatform === 'win32' 
                                 ? `Start-Process "${sanitizedApp}"` 
                                 : `open -a "${sanitizedApp}"`;
                             

@@ -40,6 +40,10 @@ function startServer(index) {
     wss.on('connection', (ws) => {
       console.log('Client connected');
       ws.send(JSON.stringify({ type: 'system', content: `Connected to Host: ${os.hostname()}` }));
+      
+      // Send Platform Config explicitly
+      ws.send(JSON.stringify({ type: 'config', platform: os.platform() }));
+      
       ws.send(JSON.stringify({ type: 'cwd', content: currentDir }));
       
       // Check Admin
@@ -57,7 +61,6 @@ function startServer(index) {
              ws.send(JSON.stringify({ type: 'system', content: `ADMIN: TRUE` }));
          } else {
              ws.send(JSON.stringify({ type: 'system', content: `ADMIN: FALSE` }));
-             // Optional: warn on non-root Linux if desired, but sticking to explicit Windows admin check request
          }
       }
 
