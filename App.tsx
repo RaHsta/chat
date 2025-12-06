@@ -24,7 +24,8 @@ const App: React.FC = () => {
     mountLocalDrive,
     isDriveMounted,
     connectRelay,
-    isRelayConnected
+    isRelayConnected,
+    downloadSetupScript
   } = useLiveGemini();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -204,6 +205,7 @@ const App: React.FC = () => {
         isMounted={isDriveMounted}
         onConnectRelay={connectRelay}
         isRelayConnected={isRelayConnected}
+        onDownloadSetup={downloadSetupScript}
       />
     </div>
   );

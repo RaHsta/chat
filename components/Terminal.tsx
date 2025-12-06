@@ -11,10 +11,11 @@ interface TerminalProps {
   isMounted?: boolean;
   onConnectRelay?: () => void;
   isRelayConnected?: boolean;
+  onDownloadSetup?: () => void; // New Prop
 }
 
 const Terminal: React.FC<TerminalProps> = ({ 
-  logs, cwd, onCommand, isOpen, onToggle, onMount, isMounted, onConnectRelay, isRelayConnected 
+  logs, cwd, onCommand, isOpen, onToggle, onMount, isMounted, onConnectRelay, isRelayConnected, onDownloadSetup 
 }) => {
   const [input, setInput] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -65,12 +66,21 @@ const Terminal: React.FC<TerminalProps> = ({
         <div className="flex items-center gap-2">
            {/* Relay Status */}
            {onConnectRelay && !isRelayConnected && (
-             <button 
-                onClick={onConnectRelay}
-                className="text-[10px] bg-blue-600 hover:bg-blue-500 text-white px-2 py-0.5 rounded"
-              >
-                Connect Shell
-              </button>
+             <>
+               <button 
+                 onClick={onDownloadSetup}
+                 className="text-[10px] bg-slate-700 hover:bg-slate-600 text-white px-2 py-0.5 rounded border border-slate-600 font-semibold text-purple-200"
+                 title="Download setup_relay.bat to run on your PC"
+               >
+                 Download .bat Setup
+               </button>
+               <button 
+                  onClick={onConnectRelay}
+                  className="text-[10px] bg-blue-600 hover:bg-blue-500 text-white px-2 py-0.5 rounded"
+                >
+                  Connect Shell
+                </button>
+             </>
            )}
            {isRelayConnected && (
               <span className="text-[10px] text-blue-400 px-2 flex items-center gap-1">
@@ -106,7 +116,7 @@ const Terminal: React.FC<TerminalProps> = ({
           GeminiOS v3.0 [Advanced Mode]<br/>
           {isRelayConnected 
              ? "Status: CONNECTED to Local Host. Full Access Granted."
-             : "Status: Restricted. Click 'Connect Shell' to enable full CMD."}<br/>
+             : "Status: Restricted. Run 'setup_relay.bat' to enable full PC access."}<br/>
           Type 'help' for available commands.
         </div>
         

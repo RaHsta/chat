@@ -20,7 +20,7 @@ interface Particle {
 const Visualizer: React.FC<VisualizerProps> = ({ outputAnalyser, inputAnalyser, isActive }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animationFrameRef = useRef<number>();
+  const animationFrameRef = useRef<number>(0);
   
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const particlesRef = useRef<Particle[]>([]);

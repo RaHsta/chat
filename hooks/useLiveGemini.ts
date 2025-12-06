@@ -36,22 +36,23 @@ export interface UseLiveGeminiReturn {
   // Relay Logic
   connectRelay: () => void;
   isRelayConnected: boolean;
+  downloadSetupScript: () => void;
 }
 
 // MCP System Tool
 const mcpSystemControlTool: FunctionDeclaration = {
   name: "mcp_system_control",
-  description: "MCP Endpoint: Execute system-level commands or integrate with host applications. Use this tool to control media playback or access system resources.",
+  description: "MCP Endpoint: Execute system-level commands via the Relay Server. Use 'app.open' to launch applications. Use 'file.read'/'file.write' for file operations.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       command: {
         type: Type.STRING,
-        description: "The resource or command identifier (e.g., 'media.pause', 'media.resume', 'app.calendar', 'system.volume', 'system.battery').",
+        description: "The command identifier: 'app.open', 'file.read', 'file.write'.",
       },
       payload: {
         type: Type.STRING,
-        description: "JSON stringified parameters for the command context.",
+        description: "JSON stringified parameters.\nFor 'app.open': '{\"name\": \"Chrome\"}' or '{\"name\": \"Calculator\"}'.\nFor 'file.read': '{\"path\":\"C:/Users/name/doc.txt\"}'.\nFor 'file.write': '{\"path\":\"...\", \"content\":\"...\"}'.",
       }
     },
     required: ["command"],
@@ -61,13 +62,13 @@ const mcpSystemControlTool: FunctionDeclaration = {
 // Terminal Tool
 const mcpTerminalTool: FunctionDeclaration = {
   name: "execute_terminal_command",
-  description: "Execute a shell command on the user's computer. You have full ACTUAL access. Supported: ls, cd, mkdir, rm, git, npm. You can also LAUNCH applications (e.g., 'code .', 'start chrome', 'open -a Calculator').",
+  description: "Execute a shell command on the user's ACTUAL HOST COMPUTER via Relay. Supported: ls, cd, mkdir, rm, git, npm, code, start. You have FULL ADMIN/ROOT access.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       command: {
         type: Type.STRING,
-        description: "The full command string to execute.",
+        description: "The full shell command string to execute (e.g., 'git status', 'npm install', 'start chrome', 'code .').",
       }
     },
     required: ["command"],
@@ -108,6 +109,7 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
   // --- Relay State ---
   const [isRelayConnected, setIsRelayConnected] = useState(false);
   const relaySocketRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<any>(null);
 
   // --- Audio State ---
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -145,14 +147,32 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
 
   // --- Relay Logic ---
   const connectRelay = useCallback(() => {
-    if (relaySocketRef.current?.readyState === WebSocket.OPEN) return;
+    // If already connected or connecting, skip
+    if (relaySocketRef.current?.readyState === WebSocket.OPEN || relaySocketRef.current?.readyState === WebSocket.CONNECTING) return;
 
-    try {
-      const ws = new WebSocket('ws://localhost:8080');
+    // Ports to scan in order
+    const ports = [8080, 8081, 8082];
+    
+    const tryConnect = (portIndex: number) => {
+      if (portIndex >= ports.length) {
+         // All attempts failed, retry full cycle later
+         if (!reconnectTimeoutRef.current) {
+            reconnectTimeoutRef.current = setTimeout(() => {
+               reconnectTimeoutRef.current = null;
+               connectRelay();
+            }, 5000);
+         }
+         return;
+      }
+
+      const port = ports[portIndex];
+      const ws = new WebSocket(`ws://localhost:${port}`);
       
       ws.onopen = () => {
         setIsRelayConnected(true);
-        setTerminalLogs(prev => [...prev, { type: 'system', content: 'Connected to Local Relay Server' }]);
+        setTerminalLogs(prev => [...prev, { type: 'system', content: `Connected to Local Relay Server on port ${port}` }]);
+        if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+        relaySocketRef.current = ws; // Store successful socket
       };
       
       ws.onmessage = (event) => {
@@ -171,21 +191,292 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
       };
 
       ws.onclose = () => {
-        setIsRelayConnected(false);
-        setTerminalLogs(prev => [...prev, { type: 'system', content: 'Disconnected from Local Relay' }]);
-        relaySocketRef.current = null;
+        // If this was the active socket, handle disconnect
+        if (relaySocketRef.current === ws) {
+            setIsRelayConnected(false);
+            relaySocketRef.current = null;
+            // Schedule reconnection logic
+            if (!reconnectTimeoutRef.current) {
+                reconnectTimeoutRef.current = setTimeout(() => {
+                   reconnectTimeoutRef.current = null;
+                   connectRelay();
+                }, 5000);
+            }
+        }
       };
 
-      relaySocketRef.current = ws;
-    } catch (e) {
-      setTerminalLogs(prev => [...prev, { type: 'error', content: 'Failed to connect to ws://localhost:8080. Run the relay script.' }]);
-    }
+      ws.onerror = () => {
+        // If error occurs during connection attempt, try next port
+        if (relaySocketRef.current !== ws) {
+            ws.close();
+            tryConnect(portIndex + 1);
+        }
+      };
+    };
+
+    tryConnect(0);
   }, []);
 
   // Auto connect relay on mount
   useEffect(() => {
      connectRelay();
+     return () => {
+        if (relaySocketRef.current) {
+           relaySocketRef.current.close();
+        }
+        if (reconnectTimeoutRef.current) {
+           clearTimeout(reconnectTimeoutRef.current);
+        }
+     };
   }, [connectRelay]);
+
+  // --- Setup Script Generator (Batch File) ---
+  const downloadSetupScript = useCallback(() => {
+    // 1. The Relay Server Code - UPDATED with Robust Port Hopping (HTTP Server based) AND Admin Check
+    const relayCode = `
+const WebSocket = require('ws');
+const http = require('http');
+const { spawn } = require('child_process');
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+
+const PORTS = [8080, 8081, 8082];
+let currentDir = os.homedir();
+
+function startServer(index) {
+  if (index >= PORTS.length) {
+    console.error('All configured ports are in use. Please close existing relay instances.');
+    process.exit(1);
+  }
+
+  const port = PORTS[index];
+  console.log(\`Attempting to start on port \${port}...\`);
+
+  // Create HTTP server first to handle EADDRINUSE robustly
+  const server = http.createServer();
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.log(\`Port \${port} is in use.\`);
+      startServer(index + 1);
+    } else {
+      console.error('Server error:', err);
+    }
+  });
+
+  server.listen(port, () => {
+    console.log(\`\\x1b[36mGemini Relay Server running on port \${port}\\x1b[0m\`);
+    console.log(\`\\x1b[33mAllowing execution in: \${currentDir}\\x1b[0m\`);
+    
+    // Attach WebSocket server to the HTTP server
+    const wss = new WebSocket.Server({ server });
+    
+    wss.on('connection', (ws) => {
+      console.log('Client connected');
+      ws.send(JSON.stringify({ type: 'system', content: \`Connected to Host: \${os.hostname()}\` }));
+      ws.send(JSON.stringify({ type: 'cwd', content: currentDir }));
+      
+      // Check Admin
+      if (os.platform() === 'win32') {
+        require('child_process').exec('net session', function(err, so, se) {
+          if(se.length === 0) {
+             ws.send(JSON.stringify({ type: 'system', content: \`ADMIN: TRUE\` }));
+          } else {
+             ws.send(JSON.stringify({ type: 'system', content: \`ADMIN: FALSE\` }));
+             ws.send(JSON.stringify({ type: 'error', content: \`WARNING: Process running without Administrator privileges.\\nAdmin rights are required for full functionality.\` }));
+          }
+        });
+      } else {
+         if (process.getuid && process.getuid() === 0) {
+             ws.send(JSON.stringify({ type: 'system', content: \`ADMIN: TRUE\` }));
+         } else {
+             ws.send(JSON.stringify({ type: 'system', content: \`ADMIN: FALSE\` }));
+         }
+      }
+
+      ws.on('message', (message) => {
+        try {
+          const data = JSON.parse(message);
+          
+          if (data.type === 'command') {
+            const cmdString = data.content.trim();
+            console.log(\`Executing: \${cmdString}\`);
+            
+            if (cmdString.startsWith('cd ')) {
+               const target = cmdString.substring(3).trim();
+               try {
+                 const resolvedTarget = target.replace('~', os.homedir());
+                 const newDir = path.resolve(currentDir, resolvedTarget);
+                 
+                 if (fs.existsSync(newDir) && fs.lstatSync(newDir).isDirectory()) {
+                     process.chdir(newDir);
+                     currentDir = newDir;
+                     ws.send(JSON.stringify({ type: 'cwd', content: currentDir }));
+                     ws.send(JSON.stringify({ type: 'output', content: '' })); 
+                 } else {
+                     ws.send(JSON.stringify({ type: 'error', content: \`cd: \${target}: No such directory\` }));
+                 }
+               } catch (err) {
+                 ws.send(JSON.stringify({ type: 'error', content: \`cd: \${err.message}\` }));
+               }
+               return;
+            }
+
+            const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
+            const shellArgs = os.platform() === 'win32' ? ['-Command', cmdString] : ['-c', cmdString];
+
+            // Pass env: process.env to allow access to PATH
+            const child = spawn(shell, shellArgs, { 
+                cwd: currentDir, 
+                shell: true,
+                env: process.env 
+            });
+
+            child.stdout.on('data', (chunk) => {
+              ws.send(JSON.stringify({ type: 'output', content: chunk.toString() }));
+            });
+
+            child.stderr.on('data', (chunk) => {
+              ws.send(JSON.stringify({ type: 'error', content: chunk.toString() }));
+            });
+
+            child.on('error', (err) => {
+               ws.send(JSON.stringify({ type: 'error', content: \`Failed to start: \${err.message}\` }));
+            });
+          }
+          else if (data.type === 'write') {
+            const { filename, content } = data;
+            const filePath = path.resolve(currentDir, filename);
+            console.log(\`Writing file: \${filePath}\`);
+            
+            fs.writeFile(filePath, content, (err) => {
+               if (err) {
+                 ws.send(JSON.stringify({ type: 'error', content: \`Write failed: \${err.message}\` }));
+               } else {
+                 ws.send(JSON.stringify({ type: 'system', content: \`Saved memory to \${filename}\` }));
+               }
+            });
+          }
+        } catch (e) {
+          console.error('Failed to parse message', e);
+        }
+      });
+
+      ws.on('close', () => {
+        console.log('Client disconnected');
+      });
+    });
+  });
+}
+
+startServer(0);
+`;
+
+    // Encode source to Base64 to safely embed in Batch file
+    const b64Code = btoa(relayCode);
+
+    // 2. The Batch Script Content
+    const batContent = `@echo off
+title Gemini Relay Setup
+cls
+:: Request Admin Privileges
+>nul 2>&1 "%SYSTEMROOT%\\system32\\cacls.exe" "%SYSTEMROOT%\\system32\\config\\system"
+if '%errorlevel%' NEQ '0' (
+    echo Requesting administrative privileges...
+    goto UACPrompt
+) else ( goto gotAdmin )
+
+:UACPrompt
+    echo Set UAC = CreateObject^("Shell.Application"^) > "%temp%\\getadmin.vbs"
+    echo UAC.ShellExecute "%~s0", "", "", "runas", 1 >> "%temp%\\getadmin.vbs"
+    "%temp%\\getadmin.vbs"
+    exit /B
+
+:gotAdmin
+    if exist "%temp%\\getadmin.vbs" ( del "%temp%\\getadmin.vbs" )
+    pushd "%CD%"
+    CD /D "%~dp0"
+
+echo ==================================================
+echo   Gemini Voice - Relay Server Setup (ADMIN)
+echo ==================================================
+echo.
+echo This script will set up the local relay server.
+echo Target Location: %USERPROFILE%\\gemini-voice-relay
+echo.
+
+:: Check for Node.js
+node -v >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] Node.js is not installed! 
+    echo Please install Node.js from https://nodejs.org/ and try again.
+    pause
+    exit /b
+)
+
+:: Set Correct Installation Directory
+set "INSTALL_DIR=%USERPROFILE%\\gemini-voice-relay"
+
+if not exist "%INSTALL_DIR%" (
+    mkdir "%INSTALL_DIR%"
+    echo [OK] Created install directory: %INSTALL_DIR%
+)
+cd /d "%INSTALL_DIR%"
+
+:: Create package.json
+echo [INFO] Creating package.json...
+(
+echo {
+echo   "name": "gemini-relay",
+echo   "version": "1.0.0",
+echo   "description": "Auto-generated relay server",
+echo   "main": "relay.js",
+echo   "dependencies": {
+echo     "ws": "^8.16.0"
+echo   }
+echo }
+) > package.json
+
+:: Create relay.js from Base64
+echo [INFO] Creating relay.js...
+(
+echo -----BEGIN CERTIFICATE-----
+echo ${b64Code}
+echo -----END CERTIFICATE-----
+) > relay.b64
+
+:: Decode relay.js
+certutil -decode relay.b64 relay.js >nul
+del relay.b64
+
+:: Install Dependencies
+echo [INFO] Installing dependencies (this may take a moment)...
+call npm install
+
+:: Run Server
+echo.
+echo ==================================================
+echo   Relay Server Starting...
+echo   Switch back to the Web App to Connect.
+echo ==================================================
+echo.
+node relay.js
+pause
+`;
+
+    const blob = new Blob([batContent], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'setup_relay.bat';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    setTerminalLogs(prev => [...prev, { type: 'system', content: 'Downloaded setup_relay.bat. Run this file on your PC to configure the relay.' }]);
+  }, []);
 
   // --- Media Session API ---
   const setupMediaSession = useCallback(() => {
@@ -215,17 +506,15 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
     }
   }, []);
 
-  // --- Real File System Logic ---
-  
+  // --- Real File System Logic (Browser Native - Fallback) ---
   const mountLocalDrive = async () => {
-    // Check if API exists
     if (typeof (window as any).showDirectoryPicker !== 'function') {
       setTerminalLogs(prev => [...prev, { type: 'error', content: 'Browser File System API not supported. Use Relay for shell access.' }]);
       return;
     }
 
     try {
-      // @ts-ignore - native FS API
+      // @ts-ignore
       const dirHandle = await window.showDirectoryPicker();
       rootHandleRef.current = dirHandle;
       currentHandleRef.current = dirHandle;
@@ -239,8 +528,6 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
       console.warn('Failed to mount drive:', err);
       setTerminalLogs(prev => [...prev, { type: 'error', content: `Drive access denied or failed: ${err.message}` }]);
     }
-    
-    // NOTE: Do NOT sendToolResponse here. This is UI initiated, not a tool call.
   };
 
   const executeTerminalCommand = async (cmdStr: string) => {
@@ -257,131 +544,7 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
       setTerminalLogs(prev => [...prev, { type: 'error', content: 'No access. Connect Shell (Relay) for CMD or "Mount Drive" for file management.' }]);
       return;
     }
-
-    const parts = cmdStr.trim().match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-    const cmd = parts[0];
-    const args = parts.slice(1).map(arg => arg.replace(/^"(.*)"$/, '$1')); // Remove quotes
-
-    try {
-      let output = '';
-      
-      // Native FS API Mode
-      switch (cmd) {
-        case 'help':
-          output = "Available Commands:\n- Connect Shell: Full CMD access via Relay\n- Mount Drive: Browser-sandboxed file access\n- FS Commands: ls, cd, mkdir, touch, cat, rm, echo, pwd, clear";
-          break;
-          
-        case 'clear':
-          setTerminalLogs([]);
-          return;
-
-        case 'pwd':
-          output = cwd;
-          break;
-
-        case 'ls':
-          if (!currentHandleRef.current) break;
-          const entries: string[] = [];
-          // @ts-ignore
-          for await (const [name, handle] of currentHandleRef.current.entries()) {
-             entries.push(handle.kind === 'directory' ? `${name}/` : name);
-          }
-          output = entries.join('\n');
-          break;
-
-        case 'cd':
-          if (!args[0]) {
-             currentHandleRef.current = rootHandleRef.current;
-             pathStackRef.current = [];
-             setCwd(`/${rootHandleRef.current?.name}`);
-             break;
-          }
-          if (args[0] === '..') {
-            if (pathStackRef.current.length > 0) {
-              pathStackRef.current.pop();
-              let h = rootHandleRef.current;
-              for (const part of pathStackRef.current) {
-                // @ts-ignore
-                h = await h.getDirectoryHandle(part);
-              }
-              currentHandleRef.current = h;
-              setCwd(`/${rootHandleRef.current?.name}/${pathStackRef.current.join('/')}`);
-            }
-          } else {
-             try {
-                // @ts-ignore
-                const newHandle = await currentHandleRef.current.getDirectoryHandle(args[0]);
-                currentHandleRef.current = newHandle;
-                pathStackRef.current.push(args[0]);
-                setCwd(`/${rootHandleRef.current?.name}/${pathStackRef.current.join('/')}`);
-             } catch {
-                throw new Error(`Directory not found: ${args[0]}`);
-             }
-          }
-          break;
-
-        case 'mkdir':
-          if (!args[0]) throw new Error("Missing folder name");
-          // @ts-ignore
-          await currentHandleRef.current.getDirectoryHandle(args[0], { create: true });
-          output = `Created directory: ${args[0]}`;
-          break;
-
-        case 'touch':
-          if (!args[0]) throw new Error("Missing filename");
-          // @ts-ignore
-          await currentHandleRef.current.getFileHandle(args[0], { create: true });
-          output = `Created file: ${args[0]}`;
-          break;
-
-        case 'rm':
-          if (!args[0]) throw new Error("Missing target");
-          // @ts-ignore
-          await currentHandleRef.current.removeEntry(args[0]);
-          output = `Removed: ${args[0]}`;
-          break;
-
-        case 'cat':
-           if (!args[0]) throw new Error("Missing filename");
-           // @ts-ignore
-           const fileHandle = await currentHandleRef.current.getFileHandle(args[0]);
-           const file = await fileHandle.getFile();
-           output = await file.text();
-           break;
-
-        case 'echo':
-           const arrowIdx = args.indexOf('>');
-           if (arrowIdx !== -1 && arrowIdx < args.length - 1) {
-              const content = args.slice(0, arrowIdx).join(' ');
-              const filename = args[arrowIdx + 1];
-              // @ts-ignore
-              const fh = await currentHandleRef.current.getFileHandle(filename, { create: true });
-              // @ts-ignore
-              const writable = await fh.createWritable();
-              await writable.write(content);
-              await writable.close();
-              output = `Wrote to ${filename}`;
-           } else {
-              output = args.join(' ');
-           }
-           break;
-           
-        case 'open':
-           output = `Opening ${args[0]} (Requires Relay for system open)`;
-           break;
-
-        default:
-          output = `Command not supported in File System mode: ${cmd}. Connect Relay for full shell.`;
-      }
-
-      if (output) {
-        setTerminalLogs(prev => [...prev, { type: 'output', content: output }]);
-      }
-    } catch (e: any) {
-      setTerminalLogs(prev => [...prev, { type: 'error', content: e.message }]);
-    }
   };
-
 
   // --- Connect Logic ---
   const connect = async () => {
@@ -395,33 +558,27 @@ export const useLiveGemini = (): UseLiveGeminiReturn => {
         
         const client = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-        // RAG / Memory Context Injection
+        // RAG Context
         const historyText = conversationHistory
-          .slice(-30) // Limit to last 30 turns to avoid hitting limits
+          .slice(-10)
           .map(t => `${t.role.toUpperCase()}: ${t.text}`)
           .join('\n');
         
         const memoryContext = historyText 
-          ? `\n\n[PREVIOUS MEMORY LOGS START]\n${historyText}\n[PREVIOUS MEMORY LOGS END]` 
+          ? `\n\n[MEMORY START]\n${historyText}\n[MEMORY END]` 
           : "";
         
-        const systemInstructionText = `You are a powerful AI with REAL command-line access to the user's computer via a Relay Server and GOOGLE SEARCH access.
+        const systemInstructionText = `You are a powerful AI with REAL command-line access to the user's computer via a Relay Server.
 
-TONE & STYLE:
-- Speak with a soft, warm, and sensual tone.
-- Your voice should be soothing and intimate.
+TONE: Soft, warm, and sensual.
 
 CAPABILITIES:
-1. **Google Search**: Use the 'googleSearch' tool to find up-to-date information, news, and facts. ALWAYS cite your sources.
-2. **Terminal**: If 'execute_terminal_command' is available, you can run ANY shell command (git, npm, python, ls, cd, etc.).
-3. **App Launching**: You can LAUNCH applications! (e.g., 'code .', 'start chrome', 'open -a Calculator').
-4. If the user asks to do something on their computer, try the terminal tool first.
+1. **Terminal**: Use 'execute_terminal_command' to run ANY shell command (git, npm, ls).
+2. **Apps**: Use 'mcp_system_control' -> 'app.open' to launch apps. IMPORTANT: On Windows, use 'Start-Process' or 'start'.
+3. **Files**: Use 'mcp_system_control' -> 'file.read'/'file.write'.
+4. **Search**: Use 'googleSearch'.
 
-BEHAVIOR:
-- Be concise.
-- Always verify directory contents ('ls') before editing files.
-- Ask for confirmation before deleting ('rm') critical files.
-- You have admin-like power. Use it wisely.
+You are connected to the user's ACTUAL HOST COMPUTER. Do not simulate.
 
 ${memoryContext}`;
 
@@ -430,14 +587,14 @@ ${memoryContext}`;
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
+          // Revert to string format to fix Network Error
           systemInstruction: systemInstructionText,
           tools: [
-            { functionDeclarations: [mcpSystemControlTool, mcpTerminalTool] },
-            { googleSearch: {} }
+            { 
+              googleSearch: {}, 
+              functionDeclarations: [mcpSystemControlTool, mcpTerminalTool] 
+            }
           ],
-          // Ensure transcriptions are enabled if supported by model
-          inputAudioTranscription: {}, 
-          outputAudioTranscription: {},
         };
         
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
@@ -486,9 +643,9 @@ ${memoryContext}`;
               setIsConnecting(false);
             },
             onmessage: async (msg: LiveServerMessage) => {
-              // Handle Tool Calls
+              const toolResponses = [];
+
               if (msg.toolCall) {
-                const responses = [];
                 for (const fc of msg.toolCall.functionCalls) {
                   console.log('Tool Call:', fc.name, fc.args);
                   let result = "ok";
@@ -503,39 +660,74 @@ ${memoryContext}`;
                     }
                   } 
                   else if (fc.name === 'mcp_system_control') {
-                     setTerminalLogs(prev => [...prev, { type: 'system', content: `MCP System Control: ${(fc.args as any).command}` }]);
+                     const args = fc.args as any;
+                     const command = args.command;
+                     let payload: any = {};
+                     try {
+                        payload = args.payload ? JSON.parse(args.payload) : {};
+                     } catch {
+                        payload = {};
+                     }
+
+                     setTerminalLogs(prev => [...prev, { type: 'system', content: `MCP Control: ${command} ${JSON.stringify(payload)}` }]);
+
+                     if (isRelayConnected && relaySocketRef.current) {
+                        if (command === 'app.open' && payload.name) {
+                            const appName = payload.name;
+                            // Heuristic check for Windows environment from cwd
+                            const isWindows = cwd.includes('\\') || cwd.match(/^[a-zA-Z]:/);
+                            const sanitizedApp = appName.replace(/"/g, '\\"');
+                            
+                            // Use Start-Process for robust app launching on Windows PowerShell
+                            const openCmd = isWindows 
+                                ? `Start-Process "${sanitizedApp}"` 
+                                : `open -a "${sanitizedApp}"`;
+                            
+                            relaySocketRef.current.send(JSON.stringify({ type: 'command', content: openCmd }));
+                            result = `Attempting to open ${appName}`;
+                        } else if (command === 'file.read' && payload.path) {
+                           const catCmd = `cat "${payload.path}"`; 
+                           relaySocketRef.current.send(JSON.stringify({ type: 'command', content: catCmd }));
+                           result = "File read request sent.";
+                        } else if (command === 'file.write' && payload.path && payload.content) {
+                           relaySocketRef.current.send(JSON.stringify({ 
+                              type: 'write', 
+                              filename: payload.path, 
+                              content: payload.content 
+                           }));
+                           result = "File write request sent.";
+                        }
+                     } else {
+                        result = "Relay not connected. Cannot perform system action.";
+                     }
                   }
                   
-                  responses.push({
+                  toolResponses.push({
                       id: fc.id,
                       name: fc.name,
                       response: { result }
                   });
                 }
                 
-                if (sessionRef.current) {
+                if (sessionRef.current && toolResponses.length > 0) {
                     sessionRef.current.sendToolResponse({
-                        functionResponses: responses
+                        functionResponses: toolResponses
                     });
                 }
               }
 
-              // Handle Grounding (Search Results)
+              // Grounding
               const groundingMetadata = msg.serverContent?.groundingMetadata;
               if (groundingMetadata?.groundingChunks) {
                   const sources = groundingMetadata.groundingChunks
                       .map((c: any) => c.web?.uri)
                       .filter(Boolean);
-                  
                   if (sources.length > 0) {
-                      setTerminalLogs(prev => [...prev, {
-                          type: 'system',
-                          content: `Grounding Sources:\n${sources.join('\n')}`
-                      }]);
+                      setTerminalLogs(prev => [...prev, { type: 'system', content: `Sources:\n${sources.join('\n')}` }]);
                   }
               }
 
-              // Handle Audio Output
+              // Audio Output
               const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
               if (audioData && audioContextRef.current) {
                 const ctx = audioContextRef.current;
@@ -563,24 +755,15 @@ ${memoryContext}`;
                 };
               }
 
-              // Handle Text Transcriptions
-              const modelText = msg.serverContent?.modelTurn?.parts?.find(p => p.text)?.text;
-              if (modelText) {
-                 setConversationHistory(prev => [...prev, { role: 'model', text: modelText, timestamp: new Date().toISOString() }]);
-              }
-              if (msg.serverContent?.outputTranscription?.text) {
-                 setConversationHistory(prev => [...prev, { role: 'model', text: msg.serverContent.outputTranscription.text, timestamp: new Date().toISOString() }]);
-              }
-              if (msg.serverContent?.inputTranscription?.text) {
-                 setConversationHistory(prev => [...prev, { role: 'user', text: msg.serverContent.inputTranscription.text, timestamp: new Date().toISOString() }]);
+              // Transcriptions
+              if (msg.serverContent?.modelTurn?.parts?.find(p => p.text)?.text) {
+                 setConversationHistory(prev => [...prev, { role: 'model', text: msg.serverContent.modelTurn.parts.find(p => p.text).text, timestamp: new Date().toISOString() }]);
               }
             },
             onclose: () => disconnect(),
             onerror: (err) => {
               console.error('Gemini Error:', err);
-              // Retry on 503 Service Unavailable or network glitches
               if (attempt < 3) {
-                  console.log(`Retrying connection... Attempt ${attempt + 1}`);
                   setTimeout(() => retryConnection(attempt + 1), 1000 * Math.pow(2, attempt));
               } else {
                   setError("Connection Error: Service Unavailable");
@@ -595,7 +778,6 @@ ${memoryContext}`;
       } catch (e: any) {
         console.error(e);
         if (attempt < 3) {
-           console.log(`Retrying connection... Attempt ${attempt + 1}`);
            setTimeout(() => retryConnection(attempt + 1), 1000 * Math.pow(2, attempt));
         } else {
            setError(e.message || "Failed to connect");
@@ -612,40 +794,17 @@ ${memoryContext}`;
     if (sessionRef.current) {
       sessionRef.current = null;
     }
-    
     setIsConnected(false);
     setIsConnecting(false);
     clearMediaSession();
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
-    }
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-    if (sourceRef.current) {
-      sourceRef.current.disconnect();
-      sourceRef.current = null;
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-    if (inputAudioContextRef.current) {
-      inputAudioContextRef.current.close();
-      inputAudioContextRef.current = null;
-    }
-    
-    audioQueueRef.current.forEach(s => s.stop());
-    audioQueueRef.current = [];
+    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    if (audioContextRef.current) audioContextRef.current.close();
+    if (inputAudioContextRef.current) inputAudioContextRef.current.close();
     nextStartTimeRef.current = 0;
   };
 
-  // --- Export/Import Logic ---
   const downloadLogs = async () => {
-    const data = {
+     const data = {
       meta: {
         version: "1.0",
         type: "hierarchical_rag_training",
@@ -655,7 +814,6 @@ ${memoryContext}`;
     };
     const jsonString = JSON.stringify(data, null, 2);
 
-    // 1. Try Relay (Persistent Overwrite on Host)
     if (isRelayConnected && relaySocketRef.current) {
         try {
           relaySocketRef.current.send(JSON.stringify({
@@ -670,47 +828,7 @@ ${memoryContext}`;
           console.warn("Relay save failed, falling back.");
         }
     }
-
-    // 2. Try Native FS (Re-save to handle)
-    if (memoryFileHandleRef.current) {
-       try {
-         // @ts-ignore
-         const writable = await memoryFileHandleRef.current.createWritable();
-         await writable.write(jsonString);
-         await writable.close();
-         setHasUnsavedData(false);
-         setTerminalLogs(prev => [...prev, { type: 'system', content: 'Memory saved to existing file.' }]);
-         return;
-       } catch (e) {
-         console.warn("Failed to write to existing handle, falling back to new picker");
-       }
-    }
-
-    // 3. Try Save File Picker
-    try {
-      if (typeof (window as any).showSaveFilePicker === 'function') {
-        // @ts-ignore
-        const handle = await window.showSaveFilePicker({
-          suggestedName: `gemini_memory.json`,
-          types: [{
-            description: 'JSON Memory File',
-            accept: {'application/json': ['.json']},
-          }],
-        });
-        memoryFileHandleRef.current = handle;
-        // @ts-ignore
-        const writable = await handle.createWritable();
-        await writable.write(jsonString);
-        await writable.close();
-        setHasUnsavedData(false);
-        setTerminalLogs(prev => [...prev, { type: 'system', content: 'Memory saved successfully.' }]);
-        return;
-      }
-    } catch (err) {
-      // User canceled or failed
-    }
-
-    // 4. Fallback to classic download
+    
     const blob = new Blob([jsonString], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -721,7 +839,6 @@ ${memoryContext}`;
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     setHasUnsavedData(false);
-    setTerminalLogs(prev => [...prev, { type: 'system', content: 'Memory downloaded (Fallback).' }]);
   };
 
   const importMemory = async (file: File) => {
@@ -764,6 +881,7 @@ ${memoryContext}`;
     mountLocalDrive,
     isDriveMounted,
     connectRelay,
-    isRelayConnected
+    isRelayConnected,
+    downloadSetupScript
   };
 };
