@@ -1,212 +1,127 @@
 
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { useLiveGemini } from './hooks/useLiveGemini';
 import Visualizer from './components/Visualizer';
 import Terminal from './components/Terminal';
+import CallCenter from './components/CallCenter';
+import Settings from './components/Settings';
+
+type ViewMode = 'CORE' | 'CALL_CENTER' | 'HISTORY' | 'SETTINGS';
 
 const App: React.FC = () => {
+  const [view, setView] = useState<ViewMode>('CORE');
+  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+
   const { 
-    connect, 
-    disconnect, 
-    isConnected, 
-    isConnecting, 
-    error,
-    analyserNode,
-    inputAnalyserNode,
-    conversationHistory,
-    hasUnsavedData,
-    downloadLogs,
-    importMemory,
-    clearMemory,
-    terminalLogs,
-    cwd,
-    executeTerminalCommand,
-    mountLocalDrive,
-    isDriveMounted,
-    connectRelay,
-    isRelayConnected,
-    downloadSetupScript
+    connect, disconnect, isConnected, isConnecting, error, analyserNode, inputAnalyserNode,
+    terminalLogs, cwd, executeTerminalCommand,
+    connectRelay, isRelayConnected, isRelayAuthorized, isHealing,
+    selfHealingEnabled, setSelfHealingEnabled, downloadSetupScript,
+    callStatus, activeCalls, conversationHistory, clearMemory
   } = useLiveGemini();
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  // Terminal set to open by default
-  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      importMemory(file);
-    }
-    // Reset input
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-slate-50 text-slate-900 relative overflow-hidden">
-      
-      {/* Background Decorative Elements - Light Theme */}
-      <div className="absolute top-0 left-0 w-full h-full overflow-hidden z-0 pointer-events-none">
-        <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-purple-200/40 rounded-full blur-[128px]"></div>
-        <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-blue-200/40 rounded-full blur-[128px]"></div>
-      </div>
-
-      <div className="z-10 w-full max-w-md flex flex-col items-center gap-10">
-        {/* Header */}
-        <div className="text-center space-y-2">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white border border-slate-200 text-xs font-medium text-purple-600 shadow-sm mb-4">
-            <span className="w-2 h-2 rounded-full bg-purple-500 animate-pulse"></span>
-            Gemini 3 Live
+    <div className="min-h-screen flex flex-col bg-white overflow-hidden">
+      {/* Top Persistent Bar */}
+      <nav className="h-20 border-b flex items-center justify-between px-10 bg-white/80 backdrop-blur-md sticky top-0 z-[100]">
+        <div className="flex items-center gap-12">
+          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('CORE')}>
+            <div className="w-8 h-8 bg-red-600 flex items-center justify-center text-white font-black rounded-lg">A</div>
+            <h1 className="text-xl font-black tracking-tighter">ARCHITECT<span className="text-red-600 font-light ml-1">v4</span></h1>
           </div>
-          <h1 className="text-4xl font-bold tracking-tight text-slate-900">
-            Gemini Voice
-          </h1>
-          <p className="text-slate-500 text-sm">
-            Experience real-time natural conversation.
-          </p>
+          
+          <div className="flex items-center gap-6">
+            <button onClick={() => setView('CORE')} className={`text-[10px] font-black uppercase tracking-widest transition-colors ${view === 'CORE' ? 'text-red-600' : 'text-slate-400 hover:text-slate-900'}`}>Core_Engine</button>
+            <button onClick={() => setView('CALL_CENTER')} className={`text-[10px] font-black uppercase tracking-widest transition-colors ${view === 'CALL_CENTER' ? 'text-red-600' : 'text-slate-400 hover:text-slate-900'}`}>Call_Center</button>
+            <button onClick={() => setView('HISTORY')} className={`text-[10px] font-black uppercase tracking-widest transition-colors ${view === 'HISTORY' ? 'text-red-600' : 'text-slate-400 hover:text-slate-900'}`}>Log_Archive</button>
+            <button onClick={() => setView('SETTINGS')} className={`text-[10px] font-black uppercase tracking-widest transition-colors ${view === 'SETTINGS' ? 'text-red-600' : 'text-slate-400 hover:text-slate-900'}`}>Settings</button>
+          </div>
         </div>
 
-        {/* Visualizer Container */}
-        <div className="w-full aspect-square bg-white rounded-[2.5rem] shadow-xl border border-slate-100 flex items-center justify-center relative overflow-hidden">
-           {/* Inner subtle gradient for depth */}
-           <div className="absolute inset-0 bg-gradient-to-b from-slate-50/50 to-slate-100/50 pointer-events-none"></div>
-           
-           <div className="z-10 w-full h-full">
-            <Visualizer 
-              outputAnalyser={analyserNode} 
-              inputAnalyser={inputAnalyserNode}
-              isActive={isConnected} 
-            />
-           </div>
-          
-          {/* Status Overlay */}
-          {!isConnected && !isConnecting && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
-              <span className="text-slate-400 text-lg font-light tracking-wide">Ready to chat</span>
-            </div>
-          )}
-          {isConnecting && (
-             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
-              <div className="flex flex-col items-center gap-3">
-                 <div className="w-8 h-8 border-2 border-slate-900 border-t-transparent rounded-full animate-spin"></div>
-                 <span className="text-slate-500 text-sm font-medium">Connecting...</span>
+        <div className="flex items-center gap-6">
+          <div className={`px-4 py-1.5 rounded-full border text-[9px] font-black tracking-widest flex items-center gap-2 ${isRelayAuthorized ? 'border-[#00FFBB]/40 bg-[#00FFBB]/5 text-[#00FFBB]' : 'border-slate-100 bg-slate-50 text-slate-400'}`}>
+             <div className={`w-1.5 h-1.5 rounded-full ${isRelayAuthorized ? 'bg-[#00FFBB] animate-pulse' : 'bg-slate-300'}`}></div>
+             {isRelayAuthorized ? 'BRIDGE_ONLINE' : 'BRIDGE_LOCKED'}
+          </div>
+          <button onClick={isConnected ? disconnect : connect} disabled={isConnecting} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isConnected ? 'bg-red-50/50 text-red-600 border border-red-100 hover:bg-red-100' : 'bg-slate-900 text-white hover:bg-black'}`}>
+            {isConnecting ? 'BOOTING...' : isConnected ? 'DISCONNECT' : 'INITIATE'}
+          </button>
+        </div>
+      </nav>
+
+      {/* Main Content Area */}
+      <main className="flex-1 relative overflow-y-auto p-12">
+        {view === 'CORE' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 max-w-7xl mx-auto">
+            <div className="lg:col-span-5">
+              <div className="relative p-1 bg-white border rounded-[4rem] shadow-sm">
+                <div className="aspect-square w-full bg-slate-50/50 rounded-[3.8rem] flex items-center justify-center overflow-hidden">
+                   <Visualizer outputAnalyser={analyserNode} inputAnalyser={inputAnalyserNode} isActive={isConnected} />
+                   {!isConnected && !isConnecting && (
+                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/40 backdrop-blur-sm">
+                        <span className="text-[10px] font-black uppercase tracking-[0.5em] text-slate-300">System Ready</span>
+                     </div>
+                   )}
+                </div>
               </div>
             </div>
-          )}
-        </div>
-
-        {/* Error Message */}
-        {error && (
-          <div className="w-full p-3 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm text-center shadow-sm">
-            {error}
+            <div className="lg:col-span-7 flex flex-col gap-8 justify-center">
+              <div className="space-y-4">
+                <h2 className="text-5xl font-black tracking-tight text-slate-900 leading-[0.9]">MASTER_LINK<br/><span className="text-slate-300">PROTOCOL</span></h2>
+                <p className="text-slate-500 text-sm max-w-md">The Architect Core provides a high-fidelity, low-latency bridge between Gemini and your local filesystem for autonomous code architecture.</p>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <button onClick={downloadSetupScript} className="p-8 border rounded-[2rem] text-left hover:border-red-600 transition-colors group">
+                  <div className="text-[10px] font-black uppercase text-red-600 mb-2">Security</div>
+                  <div className="text-lg font-bold">Deploy Relay</div>
+                  <div className="text-xs text-slate-400 mt-2">Generate a zero-config setup script for your host.</div>
+                </button>
+                <button onClick={() => setIsTerminalOpen(true)} className="p-8 border rounded-[2rem] text-left hover:border-slate-900 transition-colors">
+                  <div className="text-[10px] font-black uppercase text-slate-400 mb-2">Interface</div>
+                  <div className="text-lg font-bold">Launch Shell</div>
+                  <div className="text-xs text-slate-400 mt-2">Open the diagnostic terminal to monitor system output.</div>
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
-        {/* Controls */}
-        <div className="flex flex-col items-center gap-4 w-full">
-          <div className="flex items-center gap-6">
-            {!isConnected ? (
-              <button
-                onClick={connect}
-                disabled={isConnecting}
-                className={`
-                  group relative px-8 py-4 bg-slate-900 text-white rounded-full font-semibold text-lg shadow-xl shadow-slate-900/20 
-                  transition-all duration-300 hover:scale-105 hover:shadow-slate-900/30 focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2 focus:ring-offset-slate-50
-                  ${isConnecting ? 'opacity-70 cursor-not-allowed' : ''}
-                `}
-              >
-                <span className="flex items-center gap-2">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                  </svg>
-                  Start Conversation
-                </span>
-              </button>
-            ) : (
-               <button
-                onClick={disconnect}
-                className="
-                  group relative px-8 py-4 bg-white text-red-500 border border-red-100 rounded-full font-semibold text-lg shadow-lg shadow-red-500/5
-                  transition-all duration-300 hover:bg-red-50 hover:scale-105 hover:border-red-200 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-slate-50
-                "
-              >
-                <span className="flex items-center gap-2">
-                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                  End Call
-                </span>
-              </button>
-            )}
+        {view === 'CALL_CENTER' && <CallCenter status={callStatus} calls={activeCalls} isConnected={isConnected} onInit={connect} />}
+        
+        {view === 'HISTORY' && (
+          <div className="max-w-4xl mx-auto space-y-6">
+            <div className="flex items-center justify-between mb-8">
+              <h2 className="text-3xl font-black">LOG_ARCHIVE</h2>
+              <button onClick={clearMemory} className="text-xs font-black text-red-600 hover:underline uppercase tracking-widest">Wipe Memory</button>
+            </div>
+            {conversationHistory.length === 0 && <div className="text-center py-20 text-slate-300 font-black uppercase tracking-widest">No Records Found</div>}
+            {conversationHistory.map((h, i) => (
+              <div key={i} className={`p-8 rounded-[2.5rem] border ${h.role === 'user' ? 'bg-slate-50 border-slate-100 ml-12' : 'bg-white border-slate-200 mr-12'}`}>
+                <div className="text-[9px] font-black uppercase text-slate-400 mb-4 tracking-widest">{h.role} • {h.timestamp}</div>
+                <div className="text-sm leading-relaxed text-slate-800">{h.text}</div>
+              </div>
+            ))}
           </div>
+        )}
 
-          {/* Memory Management Area */}
-          <div className="w-full flex flex-col items-center gap-2 pt-2 border-t border-slate-200">
-             
-             {/* Load / Import Button */}
-             <div className="flex gap-4">
-                <input 
-                  type="file" 
-                  accept=".json" 
-                  ref={fileInputRef} 
-                  onChange={handleFileUpload} 
-                  className="hidden" 
-                />
-                
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="text-xs font-medium text-slate-500 hover:text-slate-800 flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors"
-                >
-                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                  </svg>
-                  Load Memory (Import)
-                </button>
-
-                {conversationHistory.length > 0 && (
-                   <button
-                    onClick={downloadLogs}
-                    className={`
-                      text-xs font-medium transition-colors flex items-center gap-1.5 px-3 py-1.5 rounded-lg
-                      ${hasUnsavedData 
-                        ? 'text-amber-600 bg-amber-50 hover:bg-amber-100' 
-                        : 'text-purple-600 hover:text-purple-700'
-                      }
-                    `}
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    {hasUnsavedData ? 'Save Training Data' : 'Download Memory'}
-                  </button>
-                )}
-             </div>
-             
-             {conversationHistory.length > 0 && (
-               <div className="text-[10px] text-slate-400 flex items-center gap-2">
-                 <span>{conversationHistory.length} turns in memory (Auto-saved locally)</span>
-                 <button onClick={clearMemory} className="text-red-400 hover:text-red-600 underline">Clear</button>
-               </div>
-             )}
-          </div>
-        </div>
-
-        <div className="text-slate-400 text-xs text-center max-w-xs">
-           Microphone access is required. Audio is streamed to Google Gemini for processing.
-        </div>
-      </div>
+        {view === 'SETTINGS' && (
+          <Settings 
+            selfHealing={selfHealingEnabled} 
+            setSelfHealing={setSelfHealingEnabled}
+            ttsHighRes={true}
+            setTtsHighRes={() => {}}
+            isRelayConnected={isRelayConnected}
+          />
+        )}
+      </main>
 
       <Terminal 
-        logs={terminalLogs} 
-        cwd={cwd} 
-        onCommand={executeTerminalCommand}
-        isOpen={isTerminalOpen}
-        onToggle={() => setIsTerminalOpen(!isTerminalOpen)}
-        onMount={mountLocalDrive}
-        isMounted={isDriveMounted}
-        onConnectRelay={connectRelay}
-        isRelayConnected={isRelayConnected}
-        onDownloadSetup={downloadSetupScript}
+        logs={terminalLogs} cwd={cwd} onCommand={executeTerminalCommand} 
+        isOpen={isTerminalOpen} onToggle={() => setIsTerminalOpen(!isTerminalOpen)} 
+        isRelayAuthorized={isRelayAuthorized} isHealing={isHealing} 
       />
+
+      {error && <div className="fixed bottom-12 left-12 p-6 bg-red-600 text-white font-bold rounded-2xl shadow-2xl z-[1000] animate-bounce">FAULT: {error}</div>}
     </div>
   );
 };

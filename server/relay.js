@@ -1,142 +1,168 @@
 
 const WebSocket = require('ws');
 const http = require('http');
-const { spawn } = require('child_process');
+const { spawn, exec, execSync } = require('child_process');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-const PORTS = [8080, 8081, 8082];
+/**
+ * ARCHITECT BRIDGE MASTER v4.0.0
+ * -----------------------------------------
+ * This is the core logic for the local agent.
+ * 
+ * OMNI-INSTALLER BLUEPRINT (COPY-PASTE FOR MANUAL SETUP):
+ * Windows (CMD):
+ *   curl -o setup.bat https://[YOUR_URL]/setup-script && setup.bat
+ * 
+ * Logic includes:
+ * 1. Node.js detection
+ * 2. Automatic binary download (Windows)
+ * 3. Dependency resolution (ws)
+ * 4. Handshake authentication
+ */
+
+const CONFIG = {
+  TOKEN: process.env.ARCHITECT_TOKEN || null,
+  PORTS: [8080, 8081, 8082, 8083],
+  VERSION: "4.0.0",
+  PLATFORM: os.platform(),
+  IS_WIN: os.platform() === 'win32'
+};
+
 let currentDir = os.homedir();
 
-function startServer(index) {
-  if (index >= PORTS.length) {
-    console.error('All configured ports are in use. Please close existing relay instances.');
+async function getSystemTelemetry() {
+  const isAdmin = await new Promise((res) => {
+    if (CONFIG.IS_WIN) exec('net session', (err) => res(!err));
+    else res(typeof process.getuid === 'function' && process.getuid() === 0);
+  });
+  return {
+    version: CONFIG.VERSION,
+    platform: CONFIG.PLATFORM,
+    hostname: os.hostname(),
+    arch: os.arch(),
+    cpu: os.cpus()[0].model,
+    uptime: os.uptime(),
+    totalMemory: (os.totalmem() / 1024 / 1024 / 1024).toFixed(2) + "GB",
+    isAdmin
+  };
+}
+
+function startRelay(portIndex) {
+  if (portIndex >= CONFIG.PORTS.length) {
+    console.error('[CRITICAL] No ports available.');
     process.exit(1);
   }
 
-  const port = PORTS[index];
-  console.log(`Attempting to start on port ${port}...`);
-
-  // Create HTTP server first to handle EADDRINUSE robustly
-  const server = http.createServer();
-
-  server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.log(`Port ${port} is in use.`);
-      startServer(index + 1);
-    } else {
-      console.error('Server error:', err);
+  const port = CONFIG.PORTS[portIndex];
+  const server = http.createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200);
+      res.end('OK');
     }
+  });
+  
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') startRelay(portIndex + 1);
+    else console.error('[SERVER_ERROR]', err);
   });
 
   server.listen(port, () => {
-    console.log(`\x1b[36mGemini Relay Server running on port ${port}\x1b[0m`);
-    console.log(`\x1b[33mAllowing execution in: ${currentDir}\x1b[0m`);
-    
-    // Attach WebSocket server to the HTTP server
+    console.log(`\x1b[31m[ARCHITECT CORE v${CONFIG.VERSION} ONLINE]\x1b[0m`);
+    console.log(`  LINK: \x1b[33mws://localhost:${port}\x1b[0m`);
+    console.log(`  AUTH: \x1b[35m${CONFIG.TOKEN ? 'ACTIVE' : 'OPEN_Handshake'}\x1b[0m`);
+    console.log('-----------------------------------------');
+
     const wss = new WebSocket.Server({ server });
-    
     wss.on('connection', (ws) => {
-      console.log('Client connected');
-      ws.send(JSON.stringify({ type: 'system', content: `Connected to Host: ${os.hostname()}` }));
-      
-      // Send Platform Config explicitly
-      ws.send(JSON.stringify({ type: 'config', platform: os.platform() }));
-      
-      ws.send(JSON.stringify({ type: 'cwd', content: currentDir }));
-      
-      // Check Admin
-      if (os.platform() === 'win32') {
-        require('child_process').exec('net session', function(err, so, se) {
-          if(se.length === 0) {
-             ws.send(JSON.stringify({ type: 'system', content: `ADMIN: TRUE` }));
-          } else {
-             ws.send(JSON.stringify({ type: 'system', content: `ADMIN: FALSE` }));
-             ws.send(JSON.stringify({ type: 'error', content: `WARNING: Process running without Administrator privileges.\nAdmin rights are required for full functionality.` }));
-          }
-        });
-      } else {
-         if (process.getuid && process.getuid() === 0) {
-             ws.send(JSON.stringify({ type: 'system', content: `ADMIN: TRUE` }));
-         } else {
-             ws.send(JSON.stringify({ type: 'system', content: `ADMIN: FALSE` }));
-         }
+      let authorized = !CONFIG.TOKEN;
+      console.log(`[${new Date().toLocaleTimeString()}] Bridge request detected.`);
+
+      const broadcastStatus = async (rid) => {
+        const stats = await getSystemTelemetry();
+        ws.send(JSON.stringify({ type: 'config', ...stats, requestId: rid }));
+        ws.send(JSON.stringify({ type: 'cwd', content: currentDir, requestId: rid }));
+      };
+
+      if (authorized) {
+        ws.send(JSON.stringify({ type: 'auth_success' }));
+        broadcastStatus();
       }
 
-      ws.on('message', (message) => {
+      ws.on('message', async (raw) => {
         try {
-          const data = JSON.parse(message);
-          
-          if (data.type === 'command') {
-            const cmdString = data.content.trim();
-            console.log(`Executing: ${cmdString}`);
-            
-            if (cmdString.startsWith('cd ')) {
-               const target = cmdString.substring(3).trim();
-               try {
-                 const resolvedTarget = target.replace('~', os.homedir());
-                 const newDir = path.resolve(currentDir, resolvedTarget);
-                 
-                 if (fs.existsSync(newDir) && fs.lstatSync(newDir).isDirectory()) {
-                     process.chdir(newDir);
-                     currentDir = newDir;
-                     ws.send(JSON.stringify({ type: 'cwd', content: currentDir }));
-                     ws.send(JSON.stringify({ type: 'output', content: '' })); 
-                 } else {
-                     ws.send(JSON.stringify({ type: 'error', content: `cd: ${target}: No such directory` }));
-                 }
-               } catch (err) {
-                 ws.send(JSON.stringify({ type: 'error', content: `cd: ${err.message}` }));
-               }
-               return;
+          const msg = JSON.parse(raw);
+          const rid = msg.requestId;
+
+          if (msg.type === 'auth') {
+            if (!CONFIG.TOKEN || msg.token === CONFIG.TOKEN) {
+              authorized = true;
+              console.log('[SECURITY] Auth successful.');
+              ws.send(JSON.stringify({ type: 'auth_success', requestId: rid }));
+              await broadcastStatus(rid);
+            } else {
+              console.warn('[SECURITY] Auth rejected.');
+              ws.send(JSON.stringify({ type: 'auth_fail', requestId: rid }));
+              ws.close();
             }
-
-            const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
-            const shellArgs = os.platform() === 'win32' ? ['-Command', cmdString] : ['-c', cmdString];
-
-            // Pass env: process.env to allow access to PATH
-            const child = spawn(shell, shellArgs, { 
-                cwd: currentDir, 
-                shell: true,
-                env: process.env 
-            });
-
-            child.stdout.on('data', (chunk) => {
-              ws.send(JSON.stringify({ type: 'output', content: chunk.toString() }));
-            });
-
-            child.stderr.on('data', (chunk) => {
-              ws.send(JSON.stringify({ type: 'error', content: chunk.toString() }));
-            });
-
-            child.on('error', (err) => {
-               ws.send(JSON.stringify({ type: 'error', content: `Failed to start: ${err.message}` }));
-            });
+            return;
           }
-          else if (data.type === 'write') {
-            const { filename, content } = data;
-            const filePath = path.resolve(currentDir, filename);
-            console.log(`Writing file: ${filePath}`);
-            
-            fs.writeFile(filePath, content, (err) => {
-               if (err) {
-                 ws.send(JSON.stringify({ type: 'error', content: `Write failed: ${err.message}` }));
-               } else {
-                 ws.send(JSON.stringify({ type: 'system', content: `Saved memory to ${filename}` }));
-               }
-            });
+
+          if (!authorized) return;
+
+          switch (msg.type) {
+            case 'command':
+              const input = msg.content.trim();
+              if (input.startsWith('cd ')) {
+                const target = path.resolve(currentDir, input.substring(3).trim().replace('~', os.homedir()));
+                if (fs.existsSync(target)) {
+                  currentDir = target;
+                  process.chdir(currentDir);
+                  ws.send(JSON.stringify({ type: 'cwd', content: currentDir, requestId: rid }));
+                } else {
+                  ws.send(JSON.stringify({ type: 'error', content: 'Directory not found: ' + target, requestId: rid }));
+                }
+                break;
+              }
+
+              const shell = CONFIG.IS_WIN ? 'powershell.exe' : 'bash';
+              const args = CONFIG.IS_WIN ? ['-NoProfile', '-Command', input] : ['-c', input];
+              const proc = spawn(shell, args, { cwd: currentDir, shell: true });
+              
+              proc.stdout.on('data', (d) => ws.send(JSON.stringify({ type: 'output', content: d.toString(), requestId: rid })));
+              proc.stderr.on('data', (d) => ws.send(JSON.stringify({ type: 'error', content: d.toString(), requestId: rid })));
+              proc.on('close', (c) => ws.send(JSON.stringify({ type: 'exit', code: c, requestId: rid })));
+              break;
+
+            case 'read':
+              const rPath = path.resolve(currentDir, msg.path);
+              fs.readFile(rPath, 'utf8', (err, data) => {
+                ws.send(JSON.stringify({ type: err ? 'error' : 'file_content', content: err ? err.message : data, requestId: rid }));
+              });
+              break;
+
+            case 'write':
+              const wPath = path.resolve(currentDir, msg.filename);
+              fs.mkdir(path.dirname(wPath), { recursive: true }, (err) => {
+                if (err) return ws.send(JSON.stringify({ type: 'error', content: err.message, requestId: rid }));
+                fs.writeFile(wPath, msg.content, (err) => {
+                  ws.send(JSON.stringify({ type: err ? 'error' : 'system', content: err ? err.message : 'Write operation successful.', requestId: rid }));
+                });
+              });
+              break;
+
+            case 'open':
+              const opener = CONFIG.IS_WIN ? 'start ""' : (CONFIG.PLATFORM === 'darwin' ? 'open' : 'xdg-open');
+              exec(`${opener} "${msg.target}"`);
+              break;
           }
         } catch (e) {
-          console.error('Failed to parse message', e);
+          console.error('[BRIDGE_FAULT]', e);
         }
-      });
-
-      ws.on('close', () => {
-        console.log('Client disconnected');
       });
     });
   });
 }
 
-startServer(0);
+startRelay(0);

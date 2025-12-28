@@ -1,7 +1,8 @@
 {
-  "name": "Gemini Live Voice",
-  "description": "A lovable, real-time conversational AI voice assistant powered by Gemini 3 Live API.",
+  "name": "Architect MCP Workspace",
+  "description": "A high-fidelity, authenticated bridge for native system automation and architecture.",
   "requestFramePermissions": [
-    "microphone"
+    "microphone",
+    "geolocation"
   ]
 }
